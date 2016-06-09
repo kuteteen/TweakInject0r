@@ -1,0 +1,178 @@
+#  inject0r
+#  TweakInject0r
+#
+#  Created by Sami Sharaf on 6/9/16.
+#  Copyright © 2016 Sami Sharaf. All rights reserved.
+
+#export
+
+#SETTINGS_PATH
+PP_CONFIG_PATH="$SOURCE_ROOT/TweakInject0r/inject0rSettings.plist"
+
+OVERWRITE_ORIGINAL_APP=$(/usr/libexec/PlistBuddy -c "Print OVERWRITE_ORIGINAL_APP" "$PP_CONFIG_PATH")
+echo "OVERWRITE_ORIGINAL_APP: $OVERWRITE_ORIGINAL_APP"
+
+KEEP_ORIGINAL_APP_NAME=$(/usr/libexec/PlistBuddy -c "Print KEEP_ORIGINAL_APP_NAME" "$PP_CONFIG_PATH")
+echo "KEEP_ORIGINAL_APP_NAME: $KEEP_ORIGINAL_APP_NAME"
+
+#SOME COMMON PATHS
+TEMP_PATH="${SRCROOT}/temp"
+WORKING_DIR="${SRCROOT}/working_dir"
+EXTRACTED_IPA_PATH="$TEMP_PATH/EXTRACTED_IPA"
+
+rm -rf "$TEMP_PATH" || true
+rm -rf "$WORKING_DIR" || true
+
+mkdir -p "$TEMP_PATH" || true
+mkdir -p "$WORKING_DIR" || true
+
+#EXTRACT .IPA FILE
+echo "EXTRACTING .IPA"
+unzip -oqq "${SRCROOT}/app.ipa" -d "$EXTRACTED_IPA_PATH"
+
+#FIND .APP PATH
+APP_PATH=$(set -- "$EXTRACTED_IPA_PATH/Payload/"*.app; echo "$1")
+echo "FOUND APP PATH: $APP_PATH"
+
+#SOME COMMON VARS
+PP_TWEAK_PATH="$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/pptweak.dylib"
+HOOKED_APP_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier"  "$APP_PATH/Info.plist")
+
+HOOKED_APP_NAME=$(/usr/libexec/PlistBuddy -c "Print CFBundleDisplayName"  "$APP_PATH/Info.plist")
+HOOKED_APP_NAME="$HOOKED_APP_NAME ++"
+
+HOOKED_EXECUTABLE=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable"  "$APP_PATH/Info.plist")
+HOOKED_EXE_PATH="$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/$HOOKED_EXECUTABLE"
+
+#DOWNLOAD TWEAK
+echo "DOWNLOADING TWEAK"
+PP_TWEAK_ZIP_PATH="$TEMP_PATH/pptweak.zip"
+curl -L "https://beta.unlimapps.com/ppsideloaded/$HOOKED_APP_BUNDLE_ID" -o "$PP_TWEAK_ZIP_PATH"
+
+#UNZIP TWEAK INTO THE WORKING DIRECTORY
+echo "EXTRACTING TWEAK"
+unzip -oqq "$PP_TWEAK_ZIP_PATH" -d "$WORKING_DIR"
+
+#COPY OVER APP CONTENTS
+echo "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/"
+rm -rf "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app" || true
+mkdir -p "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app" || true
+cp -rf "$APP_PATH/" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/"
+
+#COPY ALL .dylibs
+cp -rf "$WORKING_DIR/" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/"
+
+#SET PERMISSIONS
+if ! [[ -x "$HOOKED_EXE_PATH" ]]
+then
+echo "EXE NOT EXECUTABLE SO CHANGING PERMISSIONS"
+chmod +x "$HOOKED_EXE_PATH"
+else
+echo "EXE IS EXECUTABLE"
+fi
+
+#CHANGE DISPLAY NAME
+if [ "$KEEP_ORIGINAL_APP_NAME" != true ] ; then
+echo 'KEEP_ORIGINAL_APP_NAME IS NOT ENABLED'
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $HOOKED_APP_NAME" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/Info.plist"
+fi
+
+if [ "$OVERWRITE_ORIGINAL_APP" != true ] ; then
+echo 'PUSH IS NOT ENABLED'
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $PRODUCT_BUNDLE_IDENTIFIER" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/Info.plist"
+fi
+
+#ADD .dylib
+"${SRCROOT}/insert_dylib" --all-yes --inplace --overwrite "@executable_path/pptweak.dylib" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/$HOOKED_EXECUTABLE"
+
+#ADD THE CORRECT ENTITLEMENTS
+TEMP_PLIST="$TEMP_PATH/temp.plist"
+REAL_CODE_SIGN_ENTITLEMENTS="$TEMP_PATH/TweakInject0r.entitlements"
+security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/"$EXPANDED_PROVISIONING_PROFILE.mobileprovision" -o "$TEMP_PLIST"
+/usr/libexec/PlistBuddy -c "Print Entitlements" "$TEMP_PLIST" -x > "$REAL_CODE_SIGN_ENTITLEMENTS"
+
+#SIGN ALL BINARIES
+for DYLIB in "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/"*.dylib
+do
+FILENAME=$(basename $DYLIB)
+echo "SIGNING: $FILENAME"
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$DYLIB"
+done
+
+APP_PLUGINS_PATH="$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/PlugIns"
+if [ "$OVERWRITE_ORIGINAL_APP" != true ] ; then
+echo 'PUSH IS NOT ENABLED'
+#PLUGINS CANT BE USED IF DUPLICATES EXIST SO DELETE THEM
+rm -rf "$APP_PLUGINS_PATH" || true
+fi
+
+if [ -d "$APP_PLUGINS_PATH" ]; then
+for PLUGIN in "$APP_PLUGINS_PATH/"*.appex
+do
+#GET PLUGIN EXECUTABLE NAME
+echo "PLUGIN: $PLUGIN"
+
+#INSTALL AS ADDITIONAL APP IF PUSH IS UNNEEDED
+PLUGIN_ID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier"  "$PLUGIN/Info.plist")
+echo "PLUGIN_ID: $PLUGIN_ID"
+
+PLUGIN_EXE=$PLUGIN/$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable"  "$PLUGIN/Info.plist")
+echo "PLUGIN_EXE: $PLUGIN_EXE"
+
+#SET PERMISSIONS FOR PLUGINS
+if ! [[ -x "$PLUGIN_EXE" ]]
+then
+echo "PLUGIN_EXE NOT EXECUTABLE SO CHANGING PERMISSIONS"
+chmod +x "$PLUGIN_EXE"
+else
+echo "PLUGIN_EXE IS EXECUTABLE"
+fi
+
+#SIGN EXTENTION
+echo "SIGNING: $PLUGIN_ID"
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$PLUGIN_EXE"
+
+#UPDATE AND SIGN PLIST
+for PLUGIN_APP in "$PLUGIN/"*.app
+do
+echo "PLUGIN_APP: $PLUGIN_APP"
+if [ -d "$PLUGIN_APP" ]; then
+PLUGIN_APP_EXE=$PLUGIN_APP/$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable"  "$PLUGIN_APP/Info.plist")
+echo "PLUGIN_APP_EXE: $PLUGIN_APP_EXE"
+
+#SET PLUGIN PERMISSIONS AGAIN
+if ! [[ -x "$PLUGIN_APP_EXE" ]]
+then
+echo "PLUGIN_APP_EXE NOT EXECUTABLE SO CHANGING PERMISSIONS"
+chmod +x "$PLUGIN_APP_EXE"
+else
+echo "PLUGIN_APP_EXE IS EXECUTABLE"
+fi
+
+PLUGIN_APP_ID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier"  "$PLUGIN_APP/Info.plist")
+echo "PLUGIN_APP_ID: $PLUGIN_APP_ID"
+
+#SIGN EXTENTION
+echo "SIGNING: $PLUGIN_APP_ID"
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$PLUGIN_APP_EXE"
+fi
+done
+done
+fi
+
+APP_FRAMEWORKS_PATH="$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/Frameworks"
+if [ -d "$APP_FRAMEWORKS_PATH" ]; then
+for FRAMEWORK in "$APP_FRAMEWORKS_PATH/"*
+do
+
+#SIGN FRAMEWORK
+FILENAME=$(basename $FRAMEWORK)
+echo "SIGNING: $FILENAME WITH $EXPANDED_CODE_SIGN_IDENTITY"
+
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$FRAMEWORK"
+done
+fi
+
+#ADD ENTITLEMENTS TO ORIGINAL APP BINARY
+echo "SIGNING: FINAL BINARY WITH $EXPANDED_CODE_SIGN_IDENTITY ENTITLEMENTS: $REAL_CODE_SIGN_ENTITLEMENTS"
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --entitlements "$REAL_CODE_SIGN_ENTITLEMENTS" --timestamp=none "$HOOKED_EXE_PATH"
