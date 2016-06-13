@@ -16,10 +16,10 @@ Instructions:
 - All Done.
 
 This works with:
--YouTube
--Instagram
--Snapchat
--Facebook
--Whatsapp
--Twitter
--Vine
+- YouTube
+- Instagram
+- Snapchat
+- Facebook
+- Whatsapp
+- Twitter
+- Vine
